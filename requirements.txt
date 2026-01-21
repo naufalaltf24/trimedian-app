@@ -5,3 +5,4 @@ joblib
 plotly
 Pillow
 scikit-learn
+xgboost

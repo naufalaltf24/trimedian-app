@@ -9,7 +9,7 @@
 
 ---
 
-## 📋 Daftar Isi
+## 📋 Table of Content
 
 - [Overview](#overview)
 - [Masalah yang Diperbaiki](#masalah-yang-diperbaiki)

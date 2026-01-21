@@ -1,6 +1,6 @@
 # 🎯 Recruitment Offer Acceptance Predictor
 
-> AI-Powered Machine Learning System untuk Prediksi Penerimaan Tawaran Kerja dengan Akurasi 95%
+> > **AI-Powered Machine Learning System for Job Offer Acceptance Prediction with 95% Accuracy**
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.31-red.svg)
@@ -25,72 +25,17 @@
 
 ## 🎯 Overview
 
-Sistem prediksi berbasis Machine Learning yang membantu HR dan Recruitment teams untuk:
-- ✅ Memprediksi kemungkinan kandidat menerima job offer
-- 📊 Menganalisis faktor-faktor yang mempengaruhi keputusan kandidat
-- 🔮 Melakukan what-if analysis untuk optimasi strategi recruitment
-- 💡 Memberikan rekomendasi strategis berdasarkan data
+A Machine Learning–based prediction system that supports HR and Recruitment teams to:
+- ✅ Predict the likelihood of candidates accepting a job offer
+- 📊 Analyze key factors influencing candidates’ decisions
+- 🔮 Perform what-if analysis to optimize recruitment strategies
+- 💡 Provide data-driven strategic recommendations
 
 ### Key Metrics
 - **Model Accuracy:** 95%
 - **Training Data:** 5,000 recruitment records
 - **Features:** 13 engineered features
 - **Classes:** 3 (Likely Reject, Uncertain, Likely Accept)
-
----
-
-## 🚨 Masalah yang Diperbaiki
-
-### Critical Bugs Fixed:
-
-#### 1. ❌ Formula acceptance_cost_pressure SALAH
-**Before:**
-```python
-df['acceptance_cost_pressure'] = df['offer_acceptance_rate'] * df['cost_per_hire'] / 100
-```
-
-**After (FIXED):**
-```python
-df['acceptance_cost_pressure'] = df['cost_per_hire'] * (1 - df['offer_acceptance_rate'])
-```
-
-**Impact:** Perbedaan nilai hingga **5347%**!
-
----
-
-#### 2. ❌ Formula acceptance_time_pressure SALAH
-**Before:**
-```python
-df['acceptance_time_pressure'] = df['offer_acceptance_rate'] * df['time_to_hire_days'] / 100
-```
-
-**After (FIXED):**
-```python
-df['acceptance_time_pressure'] = df['time_to_hire_days'] * (1 - df['offer_acceptance_rate'])
-```
-
-**Impact:** Perbedaan nilai hingga **5284%**!
-
----
-
-#### 3. ❌ StandardScaler TIDAK DIGUNAKAN
-**Problem:** Model di-train dengan data yang di-scale, tapi inference tidak menggunakan scaling!
-
-**Solution:**
-```python
-# Sekarang scaler di-save dan di-load
-scaler = joblib.load('model_artifacts/scaler.joblib')
-X[num_cols_to_scale] = scaler.transform(X[num_cols_to_scale])
-```
-
-**Impact:** Feature values berbeda **100x - 1000x** dari expected range!
-
----
-
-#### 4. ❌ Scaler Tidak Disimpan di Notebook
-**Problem:** Scaler di-fit tapi tidak di-save, jadi tidak bisa di-reproduce.
-
-**Solution:** Tambahkan cell baru di notebook untuk save scaler.
 
 ---
 
@@ -134,7 +79,7 @@ X[num_cols_to_scale] = scaler.transform(X[num_cols_to_scale])
 
 ### Step 1: Clone Repository
 ```bash
-git clone <your-repo-url>
+git clone trimedian-app
 cd recruitment-predictor
 ```
 
@@ -155,7 +100,7 @@ pip install -r requirements.txt
 ```
 
 ### Step 4: Verify Model Artifacts
-Pastikan folder `model_artifacts/` berisi 4 file:
+**Ensure the `model_artifacts/` folder contains 4 files:**
 ```
 model_artifacts/
 ├── recruitment_model.joblib      # Trained XGBoost model
@@ -174,7 +119,7 @@ model_artifacts/
 streamlit run app_FIXED.py
 ```
 
-App akan terbuka di browser pada `http://localhost:8501`
+The app will open in the browser at `http://localhost:8501`
 
 ### Using the App
 
@@ -203,11 +148,9 @@ App akan terbuka di browser pada `http://localhost:8501`
 ```
 recruitment-predictor/
 │
-├── app_FIXED.py                      # ✅ Streamlit app (FIXED version)
-├── app.py                            # ❌ Old version (DO NOT USE)
+├── app.py
 │
-├── _Model_Stage_3_FIXED.ipynb       # ✅ Updated notebook with scaler saving
-├── _Model_Stage_3.ipynb             # ❌ Original notebook (reference only)
+├── Stage_3_FIXED.ipynb       
 │
 ├── model_saving_fixed.py            # Helper functions for model saving
 │
@@ -219,8 +162,6 @@ recruitment-predictor/
 │
 ├── requirements.txt                 # Python dependencies
 ├── README.md                        # This file
-└── ANALISIS_MASALAH.md             # Detailed problem analysis
-
 ```
 
 ---
@@ -261,8 +202,8 @@ recruitment-predictor/
 1. Feature engineering (8 new features)
 2. Categorical encoding (Label Encoding for dept, job, source)
 3. Categorical mapping (time_category, cost_bucket)
-4. **StandardScaler** (8 numerical features) ⚠️ CRITICAL STEP!
-
+4. **StandardScaler** (8 numerical features)
+   
 ### Model Training:
 - Train/Test Split: 80/20
 - SMOTE for class balancing

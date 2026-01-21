@@ -1,9 +1,3 @@
-import sys
-import streamlit as st
-
-st.write("Python:", sys.version)
-st.write("Sys path:", sys.path)
-
 import streamlit as st
 import pandas as pd
 import numpy as np

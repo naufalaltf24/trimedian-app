@@ -365,12 +365,6 @@ Contributions welcome! Please:
 
 ---
 
-## 📝 License
-
-This project is licensed under the MIT License.
-
----
-
 ## 👤 Author
 
 **Final Project Bootcamp Data Science**
@@ -387,15 +381,6 @@ This project is licensed under the MIT License.
 - XGBoost for powerful gradient boosting
 - Streamlit for beautiful web framework
 - Plotly for interactive visualizations
-
----
-
-## 📞 Support
-
-Jika ada pertanyaan atau issues:
-1. Check [Troubleshooting](#troubleshooting) section
-2. Baca [ANALISIS_MASALAH.md](ANALISIS_MASALAH.md) untuk detail teknis
-3. Verify all artifacts are properly saved and loaded
 
 ---
 

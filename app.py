@@ -133,6 +133,293 @@ def load_artifacts():
 model, encoders, scaler, metadata = load_artifacts()
 
 # =========================
+# Department -> Job Title Filter (ANTI-GAGAL)
+# =========================
+# Tujuan:
+# - Saat user memilih 1 department, opsi Job Title hanya menampilkan title yang memang ada di department tsb.
+# - Tidak error walaupun mapping belum tersedia (fallback: tampilkan semua job title).
+# - Mapping akan dicari dari:
+#   1) metadata.joblib (jika di dalamnya ada mapping/pairs)
+#   2) file dataset lokal (CSV/XLSX/Parquet) yang mengandung kolom department & job_title (atau variasinya)
+
+import os
+import re
+from pathlib import Path
+
+def _norm_str(x) -> str:
+    """Normalize string for robust matching."""
+    if x is None:
+        return ""
+    return str(x).strip().lower()
+
+def _norm_col(col: str) -> str:
+    """Normalize column names (department / job_title detection)."""
+    col = str(col).strip().lower()
+    col = re.sub(r"[\s\-\/]+", "_", col)
+    col = re.sub(r"[^a-z0-9_]+", "", col)
+    col = re.sub(r"_+", "_", col).strip("_")
+    return col
+
+_DEPT_COL_CANDIDATES = [
+    "department", "dept", "division", "function", "team", "org", "organisation", "organization",
+    "business_unit", "businessunit", "unit"
+]
+_TITLE_COL_CANDIDATES = [
+    "job_title", "jobtitle", "title", "position", "role", "job_role", "jobrole", "job_position", "jobposition"
+]
+
+def _detect_pair_columns(df: pd.DataFrame):
+    """Detect department & job title column names from a dataframe."""
+    # Note: dataframe boleh kosong (0 baris) — kita hanya butuh kolomnya.
+    if df is None or getattr(df, "columns", None) is None or len(df.columns) == 0:
+        return None, None
+
+    norm_to_actual = {_norm_col(c): c for c in df.columns}
+
+    dept_col = None
+    for cand in _DEPT_COL_CANDIDATES:
+        if cand in norm_to_actual:
+            dept_col = norm_to_actual[cand]
+            break
+
+    title_col = None
+    for cand in _TITLE_COL_CANDIDATES:
+        if cand in norm_to_actual:
+            title_col = norm_to_actual[cand]
+            break
+
+    return dept_col, title_col
+
+def _build_dept_job_map_from_df(
+    df_pairs: pd.DataFrame,
+    dept_norm_to_label: dict,
+    title_norm_to_label: dict
+) -> dict:
+    """Build mapping {department_label_in_encoder: [job_title_label_in_encoder, ...]} from a dataframe."""
+    if df_pairs is None or df_pairs.empty:
+        return {}
+
+    dept_col, title_col = _detect_pair_columns(df_pairs)
+    if not dept_col or not title_col:
+        # Maybe it is already standardized
+        if {"department", "job_title"}.issubset(df_pairs.columns):
+            dept_col, title_col = "department", "job_title"
+        else:
+            return {}
+
+    tmp = df_pairs[[dept_col, title_col]].copy()
+    tmp.columns = ["department", "job_title"]
+    tmp["department"] = tmp["department"].map(_norm_str)
+    tmp["job_title"] = tmp["job_title"].map(_norm_str)
+    tmp = tmp.dropna()
+
+    mapping = {}
+    for dept_norm, grp in tmp.groupby("department", dropna=True):
+        if dept_norm not in dept_norm_to_label:
+            continue
+        dept_label = dept_norm_to_label[dept_norm]
+
+        titles_norm = grp["job_title"].dropna().unique().tolist()
+        titles = [
+            title_norm_to_label[t]
+            for t in titles_norm
+            if t in title_norm_to_label
+        ]
+        if titles:
+            mapping[dept_label] = sorted(set(titles))
+
+    return mapping
+
+def _try_extract_from_metadata(dept_norm_to_label: dict, title_norm_to_label: dict):
+    """Try to extract mapping from metadata.joblib (supports many possible structures)."""
+    if metadata is None:
+        return {}, None
+
+    # Helper to read dict-like or attribute-like metadata
+    def _meta_get(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    # 1) Direct mapping dict: {department: [job_title,...]}
+    possible_map_keys = [
+        "dept_job_title_map",
+        "department_job_title_map",
+        "job_titles_by_department",
+        "department_to_job_titles",
+        "department_job_titles",
+        "job_title_by_department",
+        "dept_to_job_titles",
+    ]
+    for k in possible_map_keys:
+        m = _meta_get(metadata, k, None)
+        if isinstance(m, dict) and m:
+            try:
+                records = []
+                for dept_k, titles in m.items():
+                    if isinstance(titles, (list, tuple, set, pd.Series, np.ndarray)):
+                        for t in list(titles):
+                            records.append({"department": dept_k, "job_title": t})
+                    else:
+                        records.append({"department": dept_k, "job_title": titles})
+                df_pairs = pd.DataFrame(records)
+                mapping = _build_dept_job_map_from_df(df_pairs, dept_norm_to_label, title_norm_to_label)
+                if mapping:
+                    return mapping, f"metadata['{k}']"
+            except Exception:
+                pass
+
+    # 2) DataFrame-like object stored in metadata (dict of lists / list of dicts / df)
+    possible_df_keys = ["data", "train_data", "training_data", "df", "dataset", "raw_data", "pairs_df"]
+    for k in possible_df_keys:
+        d = _meta_get(metadata, k, None)
+        if d is None:
+            continue
+        try:
+            df_pairs = pd.DataFrame(d)
+            mapping = _build_dept_job_map_from_df(df_pairs, dept_norm_to_label, title_norm_to_label)
+            if mapping:
+                return mapping, f"metadata['{k}']"
+        except Exception:
+            pass
+
+    # 3) Pairs list/records in metadata
+    possible_pairs_keys = ["dept_job_title_pairs", "department_job_title_pairs", "pairs", "pair_records"]
+    for k in possible_pairs_keys:
+        d = _meta_get(metadata, k, None)
+        if d is None:
+            continue
+        try:
+            df_pairs = pd.DataFrame(d)
+            mapping = _build_dept_job_map_from_df(df_pairs, dept_norm_to_label, title_norm_to_label)
+            if mapping:
+                return mapping, f"metadata['{k}']"
+        except Exception:
+            pass
+
+    return {}, None
+
+def _try_extract_from_local_files(dept_norm_to_label: dict, title_norm_to_label: dict):
+    """Try to find a local dataset file that contains department & job_title columns and build mapping."""
+    # Base directory of the app (works on streamlit)
+    base_dir = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+
+    # Candidate folders (common in DS projects)
+    candidate_dirs = [
+        base_dir,
+        base_dir / "data",
+        base_dir / "dataset",
+        base_dir / "datasets",
+        base_dir / "input",
+        base_dir / "assets",
+        base_dir / "model_artifacts",
+    ]
+
+    patterns = ["*.csv", "*.xlsx", "*.xls", "*.parquet"]
+
+    # Collect candidates
+    files = []
+    for d in candidate_dirs:
+        if not d.exists() or not d.is_dir():
+            continue
+        for pat in patterns:
+            files.extend(list(d.glob(pat)))
+
+    if not files:
+        return {}, None
+
+    # Prefer files with these keywords in filename
+    preferred_keywords = ["recruit", "offer", "accept", "train", "dataset", "data", "clean", "hr"]
+    def score(p: Path):
+        name = p.name.lower()
+        return 0 if any(k in name for k in preferred_keywords) else 1
+
+    files = sorted(files, key=score)
+
+    # Try each file until we find usable cols
+    for p in files:
+        try:
+            if p.suffix.lower() == ".csv":
+                # read header only first
+                cols = pd.read_csv(p, nrows=0).columns.tolist()
+                tmp_df = pd.DataFrame(columns=cols)
+                dept_col, title_col = _detect_pair_columns(tmp_df)
+                if not dept_col or not title_col:
+                    continue
+                df_pairs = pd.read_csv(p, usecols=[dept_col, title_col], dtype=str)
+            elif p.suffix.lower() in [".xlsx", ".xls"]:
+                df_full = pd.read_excel(p, dtype=str)
+                dept_col, title_col = _detect_pair_columns(df_full)
+                if not dept_col or not title_col:
+                    continue
+                df_pairs = df_full[[dept_col, title_col]].copy()
+            elif p.suffix.lower() == ".parquet":
+                df_full = pd.read_parquet(p)
+                dept_col, title_col = _detect_pair_columns(df_full)
+                if not dept_col or not title_col:
+                    continue
+                df_pairs = df_full[[dept_col, title_col]].copy()
+            else:
+                continue
+
+            mapping = _build_dept_job_map_from_df(df_pairs, dept_norm_to_label, title_norm_to_label)
+            if mapping:
+                return mapping, str(p)
+        except Exception:
+            continue
+
+    return {}, None
+
+@st.cache_resource(show_spinner=False)
+def _load_dept_jobtitle_map():
+    """Load mapping and return (mapping_dict, source_info). Cached for performance."""
+    dept_classes = list(encoders["department"].classes_)
+    title_classes = list(encoders["job_title"].classes_)
+
+    dept_norm_to_label = {_norm_str(d): d for d in dept_classes}
+    title_norm_to_label = {_norm_str(t): t for t in title_classes}
+
+    # 1) metadata
+    mapping, source = _try_extract_from_metadata(dept_norm_to_label, title_norm_to_label)
+    if mapping:
+        return mapping, f"metadata ({source})"
+
+    # 2) local files
+    mapping, source = _try_extract_from_local_files(dept_norm_to_label, title_norm_to_label)
+    if mapping:
+        return mapping, f"local file ({source})"
+
+    # 3) fallback
+    return {}, "fallback (no mapping found)"
+
+DEPT_JOBTITLE_MAP, DEPT_JOBTITLE_MAP_SOURCE = _load_dept_jobtitle_map()
+
+def get_job_title_options(selected_department: str):
+    """Return (job_title_options, source_flag) for selected department.
+
+    - If mapping exists: return filtered titles for that department.
+    - If mapping missing / department not found: return all job titles (so app never crash).
+    """
+    all_titles = sorted(list(encoders["job_title"].classes_))
+
+    # Allow optional override from session_state (if you want to set it elsewhere)
+    override = st.session_state.get("dept_jobtitle_map_override")
+    mapping = override if isinstance(override, dict) and override else DEPT_JOBTITLE_MAP
+
+    # Direct key lookup (most common)
+    if selected_department in mapping and mapping[selected_department]:
+        return sorted(list(mapping[selected_department])), "filtered"
+
+    # Try normalized key matching
+    dept_norm = _norm_str(selected_department)
+    for k, v in mapping.items():
+        if _norm_str(k) == dept_norm and v:
+            return sorted(list(v)), "filtered"
+
+    return all_titles, "fallback_all"
+
+
+# =========================
 # Acceptance Rate Heuristic
 # =========================
 def estimate_acceptance_rate(source, time_to_hire_days, cost_per_hire):
@@ -361,68 +648,328 @@ def get_prediction_explanation(pred, prob, user_inputs):
     
     return predicted_class, confidence, explanations
 
+
 def generate_what_if_scenarios(user_inputs, encoders, scaler, model):
-    """Generate what-if analysis"""
+    """Generate exploratory what-if scenarios (non-goal-seeking).
+
+    Dipakai terutama ketika hasil sudah "Likely Accept" untuk melihat sensitivitas strategi.
+    """
     scenarios = []
-    
+
     # Scenario 1: Faster hiring
-    if user_inputs['time_to_hire_days'] > 30:
+    if user_inputs.get('time_to_hire_days', 0) > 30:
         scenario1 = user_inputs.copy()
-        scenario1['time_to_hire_days'] = max(20, user_inputs['time_to_hire_days'] - 15)
+        scenario1['time_to_hire_days'] = max(7, int(user_inputs['time_to_hire_days'] - 15))
         scenario1['time_to_hire_category'] = get_time_category(scenario1['time_to_hire_days'])
         scenario1['offer_acceptance_rate'] = estimate_acceptance_rate(
             scenario1['source'], scenario1['time_to_hire_days'], scenario1['cost_per_hire']
         )
         X1, _ = prepare_input_data(scenario1, encoders, scaler)
-        pred1 = model.predict(X1)[0]
+        pred1 = int(model.predict(X1)[0])
         prob1 = model.predict_proba(X1)[0]
         scenarios.append({
             'name': f"⚡ Faster Hiring ({scenario1['time_to_hire_days']} days)",
             'prediction': pred1,
-            'confidence': prob1[pred1],
-            'change': f"-{user_inputs['time_to_hire_days'] - scenario1['time_to_hire_days']} days"
+            'confidence': float(prob1[pred1]),
+            'accept_prob': float(prob1[2]) if len(prob1) > 2 else np.nan,
+            'change': f"-{int(user_inputs['time_to_hire_days'] - scenario1['time_to_hire_days'])} days"
         })
-    
+
     # Scenario 2: Higher cost (better package)
-    if user_inputs['cost_per_hire'] < 8000:
+    if float(user_inputs.get('cost_per_hire', 0)) < 8000:
         scenario2 = user_inputs.copy()
-        scenario2['cost_per_hire'] = min(10000, user_inputs['cost_per_hire'] * 1.3)
+        scenario2['cost_per_hire'] = float(min(10000, float(user_inputs['cost_per_hire']) * 1.3))
         scenario2['cost_bucket'] = get_cost_category(scenario2['cost_per_hire'])
         scenario2['offer_acceptance_rate'] = estimate_acceptance_rate(
             scenario2['source'], scenario2['time_to_hire_days'], scenario2['cost_per_hire']
         )
         X2, _ = prepare_input_data(scenario2, encoders, scaler)
-        pred2 = model.predict(X2)[0]
+        pred2 = int(model.predict(X2)[0])
         prob2 = model.predict_proba(X2)[0]
         scenarios.append({
             'name': f"💰 Better Package (${scenario2['cost_per_hire']:.0f})",
             'prediction': pred2,
-            'confidence': prob2[pred2],
-            'change': f"+${scenario2['cost_per_hire'] - user_inputs['cost_per_hire']:.0f}"
+            'confidence': float(prob2[pred2]),
+            'accept_prob': float(prob2[2]) if len(prob2) > 2 else np.nan,
+            'change': f"+${scenario2['cost_per_hire'] - float(user_inputs['cost_per_hire']):.0f}"
         })
-    
+
     # Scenario 3: Referral source (if not already)
-    if 'referral' not in user_inputs['source'].lower():
+    try:
+        cur_source = str(user_inputs.get('source', '')).lower()
+    except Exception:
+        cur_source = ''
+    if 'referral' not in cur_source and 'source' in encoders:
         scenario3 = user_inputs.copy()
-        # Find referral in encoder classes
-        referral_options = [c for c in encoders['source'].classes_ if 'referral' in c.lower()]
+        referral_options = [c for c in encoders['source'].classes_ if 'referral' in str(c).lower()]
         if referral_options:
             scenario3['source'] = referral_options[0]
             scenario3['offer_acceptance_rate'] = estimate_acceptance_rate(
                 scenario3['source'], scenario3['time_to_hire_days'], scenario3['cost_per_hire']
             )
             X3, _ = prepare_input_data(scenario3, encoders, scaler)
-            pred3 = model.predict(X3)[0]
+            pred3 = int(model.predict(X3)[0])
             prob3 = model.predict_proba(X3)[0]
             scenarios.append({
                 'name': "🤝 Switch to Referral",
                 'prediction': pred3,
-                'confidence': prob3[pred3],
+                'confidence': float(prob3[pred3]),
+                'accept_prob': float(prob3[2]) if len(prob3) > 2 else np.nan,
                 'change': "Source change"
             })
-    
+
     return scenarios
 
+
+def _apply_scenario_changes(base_inputs, source=None, time_to_hire_days=None, cost_per_hire=None):
+    """Copy base inputs and apply changes safely + recompute derived fields."""
+    s = dict(base_inputs)
+
+    if source is not None:
+        s["source"] = source
+    if time_to_hire_days is not None:
+        # keep within reasonable UI range
+        try:
+            s["time_to_hire_days"] = int(max(1, min(120, round(float(time_to_hire_days)))))
+        except Exception:
+            pass
+    if cost_per_hire is not None:
+        try:
+            s["cost_per_hire"] = float(max(100.0, min(15000.0, float(cost_per_hire))))
+        except Exception:
+            pass
+
+    # Derived fields (wajib untuk feature engineering)
+    s["time_to_hire_category"] = get_time_category(s["time_to_hire_days"])
+    s["cost_bucket"] = get_cost_category(s["cost_per_hire"])
+    s["offer_acceptance_rate"] = estimate_acceptance_rate(
+        s["source"], s["time_to_hire_days"], s["cost_per_hire"]
+    )
+    return s
+
+
+def _predict_scenario(user_inputs, encoders, scaler, model):
+    """Return (pred_int, prob_array). Safe wrapper."""
+    X, _ = prepare_input_data(user_inputs, encoders, scaler)
+    pred = int(model.predict(X)[0])
+    prob = model.predict_proba(X)[0]
+    return pred, prob
+
+
+def _candidate_time_values(base_time):
+    """Candidate time-to-hire values (bias: faster is better)."""
+    try:
+        t = int(round(float(base_time)))
+    except Exception:
+        t = 30
+
+    # Only suggest equal or faster (<= baseline), because it's actionable and usually preferred.
+    candidates = {t}
+    for delta in (5, 10, 15, 20, 30):
+        candidates.add(max(7, t - delta))
+
+    # Add a few meaningful fixed points if below baseline
+    for fixed in (30, 25, 20, 15, 10):
+        if fixed <= t:
+            candidates.add(fixed)
+
+    # Sort ascending (fastest first) but keep list small
+    vals = sorted(candidates)
+    # Keep up to 5 values, biased to faster options (smallest)
+    return vals[:5]
+
+
+def _candidate_cost_values(base_cost):
+    """Candidate cost-per-hire values (bias: higher budget can improve acceptance)."""
+    try:
+        c = float(base_cost)
+    except Exception:
+        c = 3000.0
+
+    candidates = {c}
+    for mult in (1.10, 1.25, 1.50):
+        candidates.add(min(15000.0, c * mult))
+
+    # Add some common benchmarks above baseline
+    for fixed in (5000.0, 8000.0, 10000.0, 12000.0, 15000.0):
+        if fixed >= c:
+            candidates.add(fixed)
+
+    bigger = sorted([x for x in candidates if x >= c])
+    # Baseline + up to 4 next bigger options
+    out = [bigger[0]]
+    out.extend(bigger[1:5])
+    # unique & sorted
+    out = sorted(set(out))
+    return out
+
+
+def generate_goal_seeking_scenarios(user_inputs, encoders, scaler, model, target_class=2, max_scenarios=3):
+    """Goal-seeking what-if scenarios.
+
+    Jika prediksi awal bukan "Likely Accept", kita cari beberapa perubahan yang paling 'masuk akal'
+    untuk mendorong model ke target_class (default: 2 = Likely Accept).
+
+    Output:
+      list of scenarios, masing-masing berisi:
+        - name, prediction, confidence (of predicted class)
+        - accept_prob (probability target class)
+        - delta_accept_pp (perubahan dalam percentage points vs baseline)
+        - change (ringkasan perubahan)
+        - meets_target (bool)
+    """
+    # Baseline
+    base_pred, base_prob = _predict_scenario(user_inputs, encoders, scaler, model)
+    base_accept_prob = float(base_prob[target_class]) if len(base_prob) > target_class else float("nan")
+
+    base_time = int(user_inputs.get("time_to_hire_days", 30))
+    base_cost = float(user_inputs.get("cost_per_hire", 3000.0))
+    base_source = user_inputs.get("source", "")
+
+    time_candidates = _candidate_time_values(base_time)
+    cost_candidates = _candidate_cost_values(base_cost)
+
+    # Rank sources by their target probability (with baseline time & cost) and take top-N.
+    sources = list(encoders["source"].classes_) if "source" in encoders else [base_source]
+    src_rank = []
+    for src in sources:
+        try:
+            s_tmp = _apply_scenario_changes(user_inputs, source=src, time_to_hire_days=base_time, cost_per_hire=base_cost)
+            pred_s, prob_s = _predict_scenario(s_tmp, encoders, scaler, model)
+            accept_p = float(prob_s[target_class]) if len(prob_s) > target_class else 0.0
+            src_rank.append((accept_p, src))
+        except Exception:
+            continue
+
+    src_rank.sort(key=lambda x: x[0], reverse=True)
+    top_sources = [s for _, s in src_rank[:5]] if src_rank else [base_source]
+    if base_source and base_source not in top_sources:
+        top_sources = [base_source] + top_sources
+    # de-duplicate
+    seen = set()
+    top_sources = [s for s in top_sources if not (s in seen or seen.add(s))]
+
+    # Evaluate grid of candidates
+    candidates = []
+    seen_keys = set()
+
+    def _change_cost_metric(t, c, src):
+        # lower = smaller change
+        t0 = max(1, base_time)
+        c0 = max(1.0, base_cost)
+        return abs(t0 - t) / t0 + abs(c0 - c) / c0 + (0.25 if src != base_source else 0.0)
+
+    for src in top_sources:
+        for t in time_candidates:
+            for c in cost_candidates:
+                # Skip baseline
+                if src == base_source and int(t) == int(base_time) and float(c) == float(base_cost):
+                    continue
+
+                key = (str(src), int(t), round(float(c), 2))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+
+                try:
+                    s = _apply_scenario_changes(user_inputs, source=src, time_to_hire_days=t, cost_per_hire=c)
+                    pred, prob = _predict_scenario(s, encoders, scaler, model)
+
+                    accept_p = float(prob[target_class]) if len(prob) > target_class else float("nan")
+                    pred_conf = float(prob[pred]) if len(prob) > pred else float("nan")
+
+                    meets_target = (pred == target_class)
+
+                    # Build a readable change string
+                    changes = []
+                    if src != base_source:
+                        changes.append(f"Source: {base_source} → {src}")
+                    if int(t) != int(base_time):
+                        changes.append(f"Time: {base_time}d → {int(t)}d")
+                    if float(c) != float(base_cost):
+                        changes.append(f"Cost: ${base_cost:.0f} → ${float(c):.0f}")
+
+                    change_str = " | ".join(changes) if changes else "No change"
+                    name = "🎯 " + (" + ".join([ch.split(':')[0] for ch in changes]) if changes else "Alternative")
+
+                    candidates.append({
+                        "name": name,
+                        "prediction": pred,
+                        "confidence": pred_conf,
+                        "accept_prob": accept_p,
+                        "delta_accept_pp": (accept_p - base_accept_prob) * 100.0 if (accept_p == accept_p and base_accept_prob == base_accept_prob) else float("nan"),
+                        "change": change_str,
+                        "meets_target": meets_target,
+                        "change_cost": _change_cost_metric(int(t), float(c), src),
+                    })
+                except Exception:
+                    continue
+
+    if not candidates:
+        return []
+
+    # Sorting: prefer those that meet target, then highest accept_prob, then smallest change
+    candidates.sort(
+        key=lambda s: (
+            0 if s["meets_target"] else 1,
+            - (s["accept_prob"] if s["accept_prob"] == s["accept_prob"] else -1.0),
+            s["change_cost"],
+        )
+    )
+
+    # If none meets target, still return best "closest" improvements (by accept_prob, then smallest change)
+    if not any(s["meets_target"] for s in candidates):
+        candidates.sort(
+            key=lambda s: (
+                - (s["accept_prob"] if s["accept_prob"] == s["accept_prob"] else -1.0),
+                s["change_cost"],
+            )
+        )
+
+    # Trim
+    return candidates[:max_scenarios]
+
+
+def render_scenario_cards(scenarios, base_accept_prob=None):
+    """Small UI helper: render scenario cards consistently."""
+    if not scenarios:
+        st.info("Tidak ada skenario yang bisa dihitung. Coba ubah input atau pastikan artifacts lengkap.")
+        return
+
+    class_names = ['Likely Reject', 'Uncertain', 'Likely Accept']
+
+    cols = st.columns(len(scenarios))
+    for col, scenario in zip(cols, scenarios):
+        with col:
+            scenario_class = class_names[scenario['prediction']] if scenario.get('prediction') in [0, 1, 2] else str(scenario.get('prediction'))
+            pred_idx = scenario.get('prediction', 0)
+            color = '#28a745' if pred_idx == 2 else '#ffc107' if pred_idx == 1 else '#dc3545'
+
+            accept_prob = scenario.get("accept_prob", np.nan)
+            delta_pp = scenario.get("delta_accept_pp", np.nan)
+
+            extra_lines = []
+            if accept_prob == accept_prob:
+                extra_lines.append(f"Likely Accept: <b>{accept_prob*100:.1f}%</b>")
+            if delta_pp == delta_pp:
+                sign = "+" if delta_pp >= 0 else ""
+                extra_lines.append(f"Δ vs base: <b>{sign}{delta_pp:.1f} pp</b>")
+
+            extra_html = "<br/>".join(extra_lines)
+
+            badge = ""
+            if scenario.get("meets_target", False):
+                badge = "<span style='font-size:0.8rem; background:#28a745; color:white; padding:0.15rem 0.5rem; border-radius:999px; margin-left:0.5rem;'>TARGET</span>"
+
+            st.markdown(f"""
+            <div style="background-color: {color}22; border: 2px solid {color}; border-radius: 10px; padding: 1rem;">
+                <h4 style="color: {color}; margin: 0;">{scenario['name']}{badge}</h4>
+                <p style="font-size: 1.2rem; font-weight: bold; margin: 0.5rem 0;">{scenario_class}</p>
+                <p style="font-size: 1.0rem; margin: 0;">Confidence: {scenario.get('confidence', 0)*100:.1f}%</p>
+                <p style="font-size: 0.95rem; margin: 0.5rem 0 0 0;">{extra_html}</p>
+                <p style="font-size: 0.85rem; color: #6c757d; margin: 0.75rem 0 0 0;">{scenario.get('change','')}</p>
+            </div>
+            """, unsafe_allow_html=True)
 # =========================
 # MAIN UI
 # =========================
@@ -447,14 +994,27 @@ with tab1:
         department = st.selectbox(
             "🏢 Department",
             options=sorted(encoders['department'].classes_),
+            key="department",
             help="Select the hiring department"
         )
         
-        # Job Title
+        # Job Title (Auto-filtered by selected Department) — ANTI-GAGAL
+        job_title_options, _jt_flag = get_job_title_options(department)
+
+        # Pastikan options tidak kosong & tidak bikin Streamlit error saat department berubah
+        if not job_title_options:
+            job_title_options = sorted(list(encoders["job_title"].classes_))
+
+        # Jika sebelumnya user memilih job title yang tidak ada di department baru,
+        # reset ke opsi pertama agar tidak error.
+        if "job_title" not in st.session_state or st.session_state["job_title"] not in job_title_options:
+            st.session_state["job_title"] = job_title_options[0]
+
         job_title = st.selectbox(
             "💼 Job Title",
-            options=sorted(encoders['job_title'].classes_),
-            help="Select the job position"
+            options=job_title_options,
+            key="job_title",
+            help="Select the job position (filtered by Department)"
         )
         
         # Source
@@ -622,35 +1182,47 @@ with tab1:
             
             st.markdown("---")
             
-            # What-If Analysis
-            st.subheader("🔮 What-If Scenario Analysis")
-            st.markdown("See how changes to recruitment strategy might affect the outcome:")
             
-            scenarios = generate_what_if_scenarios(user_inputs, encoders, scaler, model)
-            
-            if scenarios:
-                cols = st.columns(len(scenarios))
-                class_names = ['Likely Reject', 'Uncertain', 'Likely Accept']
-                
-                for i, (col, scenario) in enumerate(zip(cols, scenarios)):
-                    with col:
-                        scenario_class = class_names[scenario['prediction']]
-                        color = '#28a745' if scenario['prediction'] == 2 else '#ffc107' if scenario['prediction'] == 1 else '#dc3545'
-                        
-                        st.markdown(f"""
-                        <div style="background-color: {color}22; border: 2px solid {color}; border-radius: 10px; padding: 1rem;">
-                            <h4 style="color: {color}; margin: 0;">{scenario['name']}</h4>
-                            <p style="font-size: 1.5rem; font-weight: bold; margin: 0.5rem 0;">{scenario_class}</p>
-                            <p style="font-size: 1.2rem; margin: 0;">{scenario['confidence']*100:.1f}%</p>
-                            <p style="font-size: 0.9rem; color: #6c757d; margin: 0.5rem 0 0 0;">{scenario['change']}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
+            # Goal-Seeking / What-If Analysis
+            if pred != 2:
+                st.subheader("🎯 Goal-Seeking What-If: menuju 'Likely Accept'")
+                st.markdown(
+                    "Karena hasil saat ini **bukan Likely Accept**, aplikasi akan mencoba beberapa perubahan strategi "
+                    "yang paling masuk akal untuk mendorong prediksi menjadi **Likely Accept**. "
+                    "Ini berbasis model (decision support), bukan jaminan di dunia nyata."
+                )
+
+                base_accept_prob = float(prob[2]) if len(prob) > 2 else np.nan
+                if base_accept_prob == base_accept_prob:
+                    st.caption(f"Baseline Likely Accept probability: {base_accept_prob*100:.1f}%")
+
+                goal_scenarios = generate_goal_seeking_scenarios(
+                    user_inputs, encoders, scaler, model, target_class=2, max_scenarios=3
+                )
+
+                if goal_scenarios:
+                    render_scenario_cards(goal_scenarios, base_accept_prob=base_accept_prob)
+
+                    if not any(s.get("meets_target") for s in goal_scenarios):
+                        st.warning(
+                            "Dalam rentang perubahan yang dicoba, belum ada skenario yang membuat prediksi menjadi "
+                            "**Likely Accept**. Yang ditampilkan adalah opsi dengan peningkatan probabilitas terbesar."
+                        )
+                else:
+                    st.info("Belum bisa membuat skenario rekomendasi. Coba ubah input atau cek kembali artifacts.")
+
             else:
-                st.info("Current configuration is already optimized!")
-            
-            st.markdown("---")
-            
-            # Recommendations
+                st.subheader("🔮 What-If Scenario Analysis")
+                st.markdown(
+                    "Hasil sudah **Likely Accept**. Berikut uji sensitivitas: apa yang terjadi jika strategi diubah?"
+                )
+
+                scenarios = generate_what_if_scenarios(user_inputs, encoders, scaler, model)
+                if scenarios:
+                    render_scenario_cards(scenarios, base_accept_prob=float(prob[2]) if len(prob) > 2 else np.nan)
+                else:
+                    st.info("Konfigurasi saat ini sudah cukup optimal — tidak ada skenario eksplorasi yang relevan.")
+# Recommendations
             st.subheader("💼 Strategic Recommendations")
             
             if pred == 0:  # Likely Reject
@@ -714,11 +1286,11 @@ with tab1:
 # =========================
 with tab2:
     st.header("📂 Batch Prediction")
-    st.markdown("Upload a CSV file containing multiple candidate records to generate predictions in bulk.")
+    st.markdown("Upload file Excel (.xlsx) berisi data kandidat untuk melakukan prediksi massal.")
 
-    # 1. Template Downloader
-    with st.expander("ℹ️ How to format your CSV (Download Template)"):
-        st.markdown("Please ensure your CSV file follows exactly this structure:")
+    # 1. Template Downloader (XLSX)
+    with st.expander("ℹ️ Format File Excel (Download Template)"):
+        st.markdown("Pastikan file Excel Anda mengikuti struktur berikut:")
         
         # Create dummy template dataframe
         template_data = {
@@ -733,26 +1305,36 @@ with tab2:
         
         st.dataframe(df_template, use_container_width=True)
         
-        # Convert to CSV for download
-        csv_buffer = io.BytesIO()
-        df_template.to_csv(csv_buffer, index=False)
-        csv_bytes = csv_buffer.getvalue()
+        # Convert to Excel for download
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df_template.to_excel(writer, index=False, sheet_name='Sheet1')
+            
+        download_data = buffer.getvalue()
         
+        # Tambahkan key="template_dl" agar unik
         st.download_button(
-            label="📥 Download CSV Template",
-            data=csv_bytes,
-            file_name="recruitment_batch_template.csv",
-            mime="text/csv",
-            help="Click to download a sample CSV file to fill out."
+            label="📥 Download Template Excel (.xlsx)",
+            data=download_data,
+            file_name="recruitment_batch_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Klik untuk mengunduh contoh file Excel.",
+            key="template_dl_button" 
         )
 
-    # 2. File Uploader
-    uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
+    # 2. File Uploader (XLSX Only)
+    # PERBAIKAN: Tambahkan key="batch_uploader" di sini
+    uploaded_file = st.file_uploader(
+        "Upload file Excel Anda", 
+        type=["xlsx"], 
+        key="batch_uploader_key"
+    )
 
     if uploaded_file is not None:
         try:
-            input_df = pd.read_csv(uploaded_file)
-            st.success(f"File uploaded successfully: {input_df.shape[0]} rows loaded.")
+            # Read Excel
+            input_df = pd.read_excel(uploaded_file)
+            st.success(f"File berhasil diupload: {input_df.shape[0]} baris data.")
             
             # Preview Input
             st.subheader("Preview Data")
@@ -763,10 +1345,11 @@ with tab2:
             missing_cols = [col for col in required_cols if col not in input_df.columns]
             
             if missing_cols:
-                st.error(f"❌ Missing columns in CSV: {', '.join(missing_cols)}")
+                st.error(f"❌ Kolom berikut hilang dari file Excel: {', '.join(missing_cols)}")
             else:
-                if st.button("🚀 Process Batch Prediction", type="primary"):
-                    with st.spinner("Processing batch predictions..."):
+                # Tambahkan key juga di tombol proses
+                if st.button("🚀 Proses Batch Prediction", type="primary", key="process_batch_btn"):
+                    with st.spinner("Memproses prediksi massal..."):
                         # Prepare data for batch
                         X_batch, df_processed = prepare_batch_data(input_df, encoders, scaler)
                         
@@ -784,7 +1367,7 @@ with tab2:
                         
                         # Visualization for Batch
                         st.markdown("---")
-                        st.subheader("📊 Batch Results Summary")
+                        st.subheader("📊 Ringkasan Hasil Batch")
                         
                         col1, col2 = st.columns(2)
                         
@@ -794,7 +1377,7 @@ with tab2:
                             fig_pie = px.pie(
                                 values=pred_counts.values,
                                 names=pred_counts.index,
-                                title="Prediction Distribution",
+                                title="Distribusi Prediksi",
                                 color=pred_counts.index,
                                 color_discrete_map={
                                     'Likely Reject': '#dc3545',
@@ -809,11 +1392,11 @@ with tab2:
                             avg_conf = results_df['Confidence_Score'].mean()
                             accept_rate = (results_df['Prediction_Label'] == 'Likely Accept').mean()
                             
-                            st.metric("Average Confidence", f"{avg_conf*100:.1f}%")
-                            st.metric("Predicted Acceptance Rate", f"{accept_rate*100:.1f}%")
+                            st.metric("Rata-rata Confidence", f"{avg_conf*100:.1f}%")
+                            st.metric("Prediksi Acceptance Rate", f"{accept_rate*100:.1f}%")
                         
                         # Detailed Table
-                        st.subheader("📋 Detailed Results")
+                        st.subheader("📋 Detail Hasil")
                         
                         # Color coding function
                         def color_coding(val):
@@ -829,18 +1412,26 @@ with tab2:
                             use_container_width=True
                         )
                         
-                        # Download Results
-                        csv_result = results_df.to_csv(index=False).encode('utf-8')
+                        # Download Results as XLSX
+                        buffer_res = io.BytesIO()
+                        with pd.ExcelWriter(buffer_res, engine='xlsxwriter') as writer:
+                            results_df.to_excel(writer, index=False, sheet_name='Predictions')
+                            
+                        download_res = buffer_res.getvalue()
+
+                        # Tambahkan key di tombol download hasil
                         st.download_button(
-                            label="📥 Download Predictions as CSV",
-                            data=csv_result,
-                            file_name="recruitment_predictions_result.csv",
-                            mime="text/csv",
-                            type="primary"
+                            label="📥 Download Hasil Prediksi (.xlsx)",
+                            data=download_res,
+                            file_name="recruitment_predictions_result.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary",
+                            key="download_result_btn"
                         )
 
         except Exception as e:
-            st.error(f"Error processing file: {str(e)}")
+            st.error(f"Error memproses file: {str(e)}")
+            st.info("Pastikan file yang diupload adalah format Excel (.xlsx) yang valid.")
 
 
 # Footer (Common)

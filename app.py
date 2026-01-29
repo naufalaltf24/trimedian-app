@@ -133,6 +133,74 @@ def load_artifacts():
 model, encoders, scaler, metadata = load_artifacts()
 
 # =========================
+# Helper: Department -> Job Title options
+# =========================
+def get_job_title_options(selected_department: str):
+    """Return job title list filtered by department (fallback to all job titles).
+
+    This tries to use mappings saved in `metadata` (if available). If no mapping is found,
+    it gracefully falls back to showing all job titles.
+    """
+    # Normalize
+    dept = str(selected_department).strip().lower()
+
+    # 1) Direct mapping in metadata (most common patterns)
+    if isinstance(metadata, dict):
+        possible_keys = [
+            "dept_job_title_map",
+            "department_job_title_map",
+            "job_titles_by_department",
+            "department_to_job_titles",
+            "department_job_titles",
+        ]
+        for k in possible_keys:
+            if k in metadata and isinstance(metadata[k], dict):
+                m = metadata[k]
+                # try exact, then normalized keys
+                if dept in m:
+                    return sorted(list(m[dept]))
+                if selected_department in m:
+                    return sorted(list(m[selected_department]))
+                # try normalize mapping keys
+                for kk, vv in m.items():
+                    if str(kk).strip().lower() == dept:
+                        return sorted(list(vv))
+
+        # 2) If metadata stores a dataframe-like object with the pairs
+        for k in ["data", "train_data", "training_data", "df", "dataset"]:
+            if k in metadata:
+                try:
+                    df = pd.DataFrame(metadata[k])
+                    if {"department", "job_title"}.issubset(df.columns):
+                        df2 = df.copy()
+                        df2["department"] = df2["department"].astype(str).str.strip().str.lower()
+                        df2["job_title"] = df2["job_title"].astype(str).str.strip().str.lower()
+                        titles = df2.loc[df2["department"] == dept, "job_title"].dropna().unique().tolist()
+                        if titles:
+                            return sorted(titles)
+                except Exception:
+                    pass
+
+        # 3) If metadata stores pairs list/records
+        for k in ["dept_job_title_pairs", "department_job_title_pairs", "pairs"]:
+            if k in metadata:
+                try:
+                    records = metadata[k]
+                    df = pd.DataFrame(records)
+                    if {"department", "job_title"}.issubset(df.columns):
+                        df["department"] = df["department"].astype(str).str.strip().str.lower()
+                        df["job_title"] = df["job_title"].astype(str).str.strip().str.lower()
+                        titles = df.loc[df["department"] == dept, "job_title"].dropna().unique().tolist()
+                        if titles:
+                            return sorted(titles)
+                except Exception:
+                    pass
+
+    # Fallback: show all known job titles
+    return sorted(list(encoders["job_title"].classes_))
+
+
+# =========================
 # Acceptance Rate Heuristic
 # =========================
 def estimate_acceptance_rate(source, time_to_hire_days, cost_per_hire):
@@ -447,14 +515,22 @@ with tab1:
         department = st.selectbox(
             "🏢 Department",
             options=sorted(encoders['department'].classes_),
-            help="Select the hiring department"
+            help="Select the hiring department",
+            key="department"
         )
         
-        # Job Title
+        # Job Title (filtered by selected department)
+        job_title_options = get_job_title_options(department)
+
+        # If previously selected job title is not valid for the new department, reset it
+        if "job_title" in st.session_state and st.session_state["job_title"] not in job_title_options:
+            st.session_state["job_title"] = job_title_options[0] if job_title_options else None
+
         job_title = st.selectbox(
             "💼 Job Title",
-            options=sorted(encoders['job_title'].classes_),
-            help="Select the job position"
+            options=job_title_options,
+            help="Select the job position",
+            key="job_title"
         )
         
         # Source
@@ -714,11 +790,11 @@ with tab1:
 # =========================
 with tab2:
     st.header("📂 Batch Prediction")
-    st.markdown("Upload a CSV file containing multiple candidate records to generate predictions in bulk.")
+    st.markdown("Upload file Excel (.xlsx) berisi data kandidat untuk melakukan prediksi massal.")
 
-    # 1. Template Downloader
-    with st.expander("ℹ️ How to format your CSV (Download Template)"):
-        st.markdown("Please ensure your CSV file follows exactly this structure:")
+    # 1. Template Downloader (XLSX)
+    with st.expander("ℹ️ Format File Excel (Download Template)"):
+        st.markdown("Pastikan file Excel Anda mengikuti struktur berikut:")
         
         # Create dummy template dataframe
         template_data = {
@@ -733,26 +809,36 @@ with tab2:
         
         st.dataframe(df_template, use_container_width=True)
         
-        # Convert to CSV for download
-        csv_buffer = io.BytesIO()
-        df_template.to_csv(csv_buffer, index=False)
-        csv_bytes = csv_buffer.getvalue()
+        # Convert to Excel for download
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df_template.to_excel(writer, index=False, sheet_name='Sheet1')
+            
+        download_data = buffer.getvalue()
         
+        # Tambahkan key="template_dl" agar unik
         st.download_button(
-            label="📥 Download CSV Template",
-            data=csv_bytes,
-            file_name="recruitment_batch_template.csv",
-            mime="text/csv",
-            help="Click to download a sample CSV file to fill out."
+            label="📥 Download Template Excel (.xlsx)",
+            data=download_data,
+            file_name="recruitment_batch_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Klik untuk mengunduh contoh file Excel.",
+            key="template_dl_button" 
         )
 
-    # 2. File Uploader
-    uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
+    # 2. File Uploader (XLSX Only)
+    # PERBAIKAN: Tambahkan key="batch_uploader" di sini
+    uploaded_file = st.file_uploader(
+        "Upload file Excel Anda", 
+        type=["xlsx"], 
+        key="batch_uploader_key"
+    )
 
     if uploaded_file is not None:
         try:
-            input_df = pd.read_csv(uploaded_file)
-            st.success(f"File uploaded successfully: {input_df.shape[0]} rows loaded.")
+            # Read Excel
+            input_df = pd.read_excel(uploaded_file)
+            st.success(f"File berhasil diupload: {input_df.shape[0]} baris data.")
             
             # Preview Input
             st.subheader("Preview Data")
@@ -763,10 +849,11 @@ with tab2:
             missing_cols = [col for col in required_cols if col not in input_df.columns]
             
             if missing_cols:
-                st.error(f"❌ Missing columns in CSV: {', '.join(missing_cols)}")
+                st.error(f"❌ Kolom berikut hilang dari file Excel: {', '.join(missing_cols)}")
             else:
-                if st.button("🚀 Process Batch Prediction", type="primary"):
-                    with st.spinner("Processing batch predictions..."):
+                # Tambahkan key juga di tombol proses
+                if st.button("🚀 Proses Batch Prediction", type="primary", key="process_batch_btn"):
+                    with st.spinner("Memproses prediksi massal..."):
                         # Prepare data for batch
                         X_batch, df_processed = prepare_batch_data(input_df, encoders, scaler)
                         
@@ -784,7 +871,7 @@ with tab2:
                         
                         # Visualization for Batch
                         st.markdown("---")
-                        st.subheader("📊 Batch Results Summary")
+                        st.subheader("📊 Ringkasan Hasil Batch")
                         
                         col1, col2 = st.columns(2)
                         
@@ -794,7 +881,7 @@ with tab2:
                             fig_pie = px.pie(
                                 values=pred_counts.values,
                                 names=pred_counts.index,
-                                title="Prediction Distribution",
+                                title="Distribusi Prediksi",
                                 color=pred_counts.index,
                                 color_discrete_map={
                                     'Likely Reject': '#dc3545',
@@ -809,11 +896,11 @@ with tab2:
                             avg_conf = results_df['Confidence_Score'].mean()
                             accept_rate = (results_df['Prediction_Label'] == 'Likely Accept').mean()
                             
-                            st.metric("Average Confidence", f"{avg_conf*100:.1f}%")
-                            st.metric("Predicted Acceptance Rate", f"{accept_rate*100:.1f}%")
+                            st.metric("Rata-rata Confidence", f"{avg_conf*100:.1f}%")
+                            st.metric("Prediksi Acceptance Rate", f"{accept_rate*100:.1f}%")
                         
                         # Detailed Table
-                        st.subheader("📋 Detailed Results")
+                        st.subheader("📋 Detail Hasil")
                         
                         # Color coding function
                         def color_coding(val):
@@ -829,18 +916,26 @@ with tab2:
                             use_container_width=True
                         )
                         
-                        # Download Results
-                        csv_result = results_df.to_csv(index=False).encode('utf-8')
+                        # Download Results as XLSX
+                        buffer_res = io.BytesIO()
+                        with pd.ExcelWriter(buffer_res, engine='xlsxwriter') as writer:
+                            results_df.to_excel(writer, index=False, sheet_name='Predictions')
+                            
+                        download_res = buffer_res.getvalue()
+
+                        # Tambahkan key di tombol download hasil
                         st.download_button(
-                            label="📥 Download Predictions as CSV",
-                            data=csv_result,
-                            file_name="recruitment_predictions_result.csv",
-                            mime="text/csv",
-                            type="primary"
+                            label="📥 Download Hasil Prediksi (.xlsx)",
+                            data=download_res,
+                            file_name="recruitment_predictions_result.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary",
+                            key="download_result_btn"
                         )
 
         except Exception as e:
-            st.error(f"Error processing file: {str(e)}")
+            st.error(f"Error memproses file: {str(e)}")
+            st.info("Pastikan file yang diupload adalah format Excel (.xlsx) yang valid.")
 
 
 # Footer (Common)

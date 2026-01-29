@@ -714,11 +714,11 @@ with tab1:
 # =========================
 with tab2:
     st.header("📂 Batch Prediction")
-    st.markdown("Upload file Excel (.xlsx) berisi data kandidat untuk melakukan prediksi massal.")
+    st.markdown("Upload a CSV file containing multiple candidate records to generate predictions in bulk.")
 
-    # 1. Template Downloader (XLSX)
-    with st.expander("ℹ️ Format File Excel (Download Template)"):
-        st.markdown("Pastikan file Excel Anda mengikuti struktur berikut:")
+    # 1. Template Downloader
+    with st.expander("ℹ️ How to format your CSV (Download Template)"):
+        st.markdown("Please ensure your CSV file follows exactly this structure:")
         
         # Create dummy template dataframe
         template_data = {
@@ -733,36 +733,26 @@ with tab2:
         
         st.dataframe(df_template, use_container_width=True)
         
-        # Convert to Excel for download
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            df_template.to_excel(writer, index=False, sheet_name='Sheet1')
-            
-        download_data = buffer.getvalue()
+        # Convert to CSV for download
+        csv_buffer = io.BytesIO()
+        df_template.to_csv(csv_buffer, index=False)
+        csv_bytes = csv_buffer.getvalue()
         
-        # Tambahkan key="template_dl" agar unik
         st.download_button(
-            label="📥 Download Template Excel (.xlsx)",
-            data=download_data,
-            file_name="recruitment_batch_template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Klik untuk mengunduh contoh file Excel.",
-            key="template_dl_button" 
+            label="📥 Download CSV Template",
+            data=csv_bytes,
+            file_name="recruitment_batch_template.csv",
+            mime="text/csv",
+            help="Click to download a sample CSV file to fill out."
         )
 
-    # 2. File Uploader (XLSX Only)
-    # PERBAIKAN: Tambahkan key="batch_uploader" di sini
-    uploaded_file = st.file_uploader(
-        "Upload file Excel Anda", 
-        type=["xlsx"], 
-        key="batch_uploader_key"
-    )
+    # 2. File Uploader
+    uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 
     if uploaded_file is not None:
         try:
-            # Read Excel
-            input_df = pd.read_excel(uploaded_file)
-            st.success(f"File berhasil diupload: {input_df.shape[0]} baris data.")
+            input_df = pd.read_csv(uploaded_file)
+            st.success(f"File uploaded successfully: {input_df.shape[0]} rows loaded.")
             
             # Preview Input
             st.subheader("Preview Data")
@@ -773,11 +763,10 @@ with tab2:
             missing_cols = [col for col in required_cols if col not in input_df.columns]
             
             if missing_cols:
-                st.error(f"❌ Kolom berikut hilang dari file Excel: {', '.join(missing_cols)}")
+                st.error(f"❌ Missing columns in CSV: {', '.join(missing_cols)}")
             else:
-                # Tambahkan key juga di tombol proses
-                if st.button("🚀 Proses Batch Prediction", type="primary", key="process_batch_btn"):
-                    with st.spinner("Memproses prediksi massal..."):
+                if st.button("🚀 Process Batch Prediction", type="primary"):
+                    with st.spinner("Processing batch predictions..."):
                         # Prepare data for batch
                         X_batch, df_processed = prepare_batch_data(input_df, encoders, scaler)
                         
@@ -795,7 +784,7 @@ with tab2:
                         
                         # Visualization for Batch
                         st.markdown("---")
-                        st.subheader("📊 Ringkasan Hasil Batch")
+                        st.subheader("📊 Batch Results Summary")
                         
                         col1, col2 = st.columns(2)
                         
@@ -805,7 +794,7 @@ with tab2:
                             fig_pie = px.pie(
                                 values=pred_counts.values,
                                 names=pred_counts.index,
-                                title="Distribusi Prediksi",
+                                title="Prediction Distribution",
                                 color=pred_counts.index,
                                 color_discrete_map={
                                     'Likely Reject': '#dc3545',
@@ -820,11 +809,11 @@ with tab2:
                             avg_conf = results_df['Confidence_Score'].mean()
                             accept_rate = (results_df['Prediction_Label'] == 'Likely Accept').mean()
                             
-                            st.metric("Rata-rata Confidence", f"{avg_conf*100:.1f}%")
-                            st.metric("Prediksi Acceptance Rate", f"{accept_rate*100:.1f}%")
+                            st.metric("Average Confidence", f"{avg_conf*100:.1f}%")
+                            st.metric("Predicted Acceptance Rate", f"{accept_rate*100:.1f}%")
                         
                         # Detailed Table
-                        st.subheader("📋 Detail Hasil")
+                        st.subheader("📋 Detailed Results")
                         
                         # Color coding function
                         def color_coding(val):
@@ -840,26 +829,18 @@ with tab2:
                             use_container_width=True
                         )
                         
-                        # Download Results as XLSX
-                        buffer_res = io.BytesIO()
-                        with pd.ExcelWriter(buffer_res, engine='xlsxwriter') as writer:
-                            results_df.to_excel(writer, index=False, sheet_name='Predictions')
-                            
-                        download_res = buffer_res.getvalue()
-
-                        # Tambahkan key di tombol download hasil
+                        # Download Results
+                        csv_result = results_df.to_csv(index=False).encode('utf-8')
                         st.download_button(
-                            label="📥 Download Hasil Prediksi (.xlsx)",
-                            data=download_res,
-                            file_name="recruitment_predictions_result.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            type="primary",
-                            key="download_result_btn"
+                            label="📥 Download Predictions as CSV",
+                            data=csv_result,
+                            file_name="recruitment_predictions_result.csv",
+                            mime="text/csv",
+                            type="primary"
                         )
 
         except Exception as e:
-            st.error(f"Error memproses file: {str(e)}")
-            st.info("Pastikan file yang diupload adalah format Excel (.xlsx) yang valid.")
+            st.error(f"Error processing file: {str(e)}")
 
 
 # Footer (Common)

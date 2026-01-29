@@ -149,7 +149,7 @@ recruitment-predictor/
 │
 ├── app.py
 │
-├── Stage_3_FIXED.ipynb       
+├── Stage_3.ipynb       
 │
 ├── model_saving_fixed.py            # Helper functions for model saving
 │
@@ -215,7 +215,7 @@ recruitment-predictor/
 
 ### Option 1: Local Deployment
 ```bash
-streamlit run app_FIXED.py
+streamlit run app.py
 ```
 
 ### Option 2: Streamlit Cloud
@@ -241,7 +241,7 @@ COPY . .
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "app_FIXED.py"]
+CMD ["streamlit", "run", "app.py"]
 ```
 
 Build and run:
@@ -270,7 +270,7 @@ Streamlit prediction: Class 0
 ```
 
 **Solution:** 
-1. ✅ Gunakan `app_FIXED.py` (bukan `app.py`)
+1. ✅ Gunakan `app.py`
 2. ✅ Pastikan `scaler.joblib` ada dan di-load
 3. ✅ Verifikasi formula acceptance_cost_pressure dan acceptance_time_pressure
 

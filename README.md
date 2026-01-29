@@ -115,7 +115,7 @@ model_artifacts/
 ### Running Locally
 
 ```bash
-streamlit run app_FIXED.py
+streamlit run app.py
 ```
 
 The app will open in the browser at `http://localhost:8501`

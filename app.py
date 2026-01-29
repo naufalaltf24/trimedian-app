@@ -133,74 +133,6 @@ def load_artifacts():
 model, encoders, scaler, metadata = load_artifacts()
 
 # =========================
-# Helper: Department -> Job Title options
-# =========================
-def get_job_title_options(selected_department: str):
-    """Return job title list filtered by department (fallback to all job titles).
-
-    This tries to use mappings saved in `metadata` (if available). If no mapping is found,
-    it gracefully falls back to showing all job titles.
-    """
-    # Normalize
-    dept = str(selected_department).strip().lower()
-
-    # 1) Direct mapping in metadata (most common patterns)
-    if isinstance(metadata, dict):
-        possible_keys = [
-            "dept_job_title_map",
-            "department_job_title_map",
-            "job_titles_by_department",
-            "department_to_job_titles",
-            "department_job_titles",
-        ]
-        for k in possible_keys:
-            if k in metadata and isinstance(metadata[k], dict):
-                m = metadata[k]
-                # try exact, then normalized keys
-                if dept in m:
-                    return sorted(list(m[dept]))
-                if selected_department in m:
-                    return sorted(list(m[selected_department]))
-                # try normalize mapping keys
-                for kk, vv in m.items():
-                    if str(kk).strip().lower() == dept:
-                        return sorted(list(vv))
-
-        # 2) If metadata stores a dataframe-like object with the pairs
-        for k in ["data", "train_data", "training_data", "df", "dataset"]:
-            if k in metadata:
-                try:
-                    df = pd.DataFrame(metadata[k])
-                    if {"department", "job_title"}.issubset(df.columns):
-                        df2 = df.copy()
-                        df2["department"] = df2["department"].astype(str).str.strip().str.lower()
-                        df2["job_title"] = df2["job_title"].astype(str).str.strip().str.lower()
-                        titles = df2.loc[df2["department"] == dept, "job_title"].dropna().unique().tolist()
-                        if titles:
-                            return sorted(titles)
-                except Exception:
-                    pass
-
-        # 3) If metadata stores pairs list/records
-        for k in ["dept_job_title_pairs", "department_job_title_pairs", "pairs"]:
-            if k in metadata:
-                try:
-                    records = metadata[k]
-                    df = pd.DataFrame(records)
-                    if {"department", "job_title"}.issubset(df.columns):
-                        df["department"] = df["department"].astype(str).str.strip().str.lower()
-                        df["job_title"] = df["job_title"].astype(str).str.strip().str.lower()
-                        titles = df.loc[df["department"] == dept, "job_title"].dropna().unique().tolist()
-                        if titles:
-                            return sorted(titles)
-                except Exception:
-                    pass
-
-    # Fallback: show all known job titles
-    return sorted(list(encoders["job_title"].classes_))
-
-
-# =========================
 # Acceptance Rate Heuristic
 # =========================
 def estimate_acceptance_rate(source, time_to_hire_days, cost_per_hire):
@@ -515,22 +447,14 @@ with tab1:
         department = st.selectbox(
             "🏢 Department",
             options=sorted(encoders['department'].classes_),
-            help="Select the hiring department",
-            key="department"
+            help="Select the hiring department"
         )
         
-        # Job Title (filtered by selected department)
-        job_title_options = get_job_title_options(department)
-
-        # If previously selected job title is not valid for the new department, reset it
-        if "job_title" in st.session_state and st.session_state["job_title"] not in job_title_options:
-            st.session_state["job_title"] = job_title_options[0] if job_title_options else None
-
+        # Job Title
         job_title = st.selectbox(
             "💼 Job Title",
-            options=job_title_options,
-            help="Select the job position",
-            key="job_title"
+            options=sorted(encoders['job_title'].classes_),
+            help="Select the job position"
         )
         
         # Source
@@ -546,7 +470,7 @@ with tab1:
         num_applicants = st.number_input(
             "👥 Number of Applicants",
             min_value=1,
-            max_value=500,
+            max_value=1000,
             value=50,
             help="Total number of applicants for this position"
         )
@@ -554,7 +478,7 @@ with tab1:
         time_to_hire_days = st.number_input(
             "⏱️ Time to Hire (days)",
             min_value=1,
-            max_value=120,
+            max_value=180,
             value=30,
             help="Expected time to complete hiring process"
         )
@@ -562,7 +486,7 @@ with tab1:
         cost_per_hire = st.number_input(
             "💵 Cost per Hire ($)",
             min_value=100.0,
-            max_value=15000.0,
+            max_value=20000.0,
             value=3000.0,
             step=100.0,
             help="Total recruitment cost per hire"

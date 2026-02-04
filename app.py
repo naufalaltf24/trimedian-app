@@ -12,7 +12,7 @@ from PIL import Image
 # PAGE CONFIG
 # =========================
 try:
-    icon_image = Image.open("figure/logo(2).png") 
+    icon_image = Image.open("figure/logo.png") 
 except FileNotFoundError:
     icon_image = "🎯"
 
@@ -985,7 +985,7 @@ tab1, tab2 = st.tabs(["🔍 Single Prediction", "📂 Batch Prediction"])
 with tab1:
     # Sidebar is primarily for Single Prediction inputs
     with st.sidebar:
-        st.image("figure/logo(2).png", width=80)
+        st.image("figure/logo.png", width=80)
         st.title("Parameters Input")
         st.caption("Use this for Single Predictions")
         st.markdown("---")
